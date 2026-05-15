@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<HTA:APPLICATION
+    ID="GeneradorPollinations"
+    APPLICATIONNAME="Generador Imagen Pollinations"
+    SCROLL="no"
+    SINGLEINSTANCE="yes"
+    WINDOWSTATE="normal"
+    CAPTION="yes"
+    SYSMENU="yes"
+    MAXIMIZEBUTTON="no"
+    MINIMIZEBUTTON="yes"
+    BORDER="thin"
+    INNERBORDER="no"
+    CONTEXTMENU="no"
+    SELECTION="no">
+
+<script type="text/javascript">
+var DEFAULT_API_KEY = "sk_FT8sbjVEBDyDEUY8d16s4HAfCMiAd2Qa";
+var API_KEY = DEFAULT_API_KEY;
+var BASE_URL = "https://gen.pollinations.ai/image/";
+var MODEL = "flux";
+var HEIGHT = 1024;
+var WIDTH = 576;
+var ultimoArchivoImagen = "";
+var ultimoPrompt = "";
+
+function getEstadoPath() {
+    var shell = new ActiveXObject("WScript.Shell");
+    var appData = shell.ExpandEnvironmentStrings("%APPDATA%");
+    return appData + "\\generador_pollinations_estado.json";
+}
+
+function getTempImagePath() {
+    var shell = new ActiveXObject("WScript.Shell");
+    var temp = shell.ExpandEnvironmentStrings("%TEMP%");
+    var stamp = new Date().getTime();
+    return temp + "\\pollinations_image_" + stamp + ".jpg";
+}
+
+function trimText(txt) {
+    return String(txt || "").replace(/^\s+|\s+$/g, "");
+}
+
+function getApiKey() {
+    var keyEl = document.getElementById("api-key");
+    var key = keyEl ? trimText(keyEl.value) : "";
+    return key !== "" ? key : DEFAULT_API_KEY;
+}
+
+function setEstado(texto, tipo) {
+    var el = document.getElementById("estado");
+    if (!el) return;
+    el.className = "estado " + (tipo || "info");
+    el.innerHTML = texto;
+}
+
+function habilitarBotones(habilitado) {
+    document.getElementById("btn-generar").disabled = !habilitado;
+    document.getElementById("btn-abrir").disabled = habilitado ? (ultimoArchivoImagen === "") : true;
+    document.getElementById("btn-carpeta").disabled = habilitado ? (ultimoArchivoImagen === "") : true;
+}
+
+function construirUrl(prompt) {
+    return BASE_URL + encodeURIComponent(prompt) +
+        "?model=" + encodeURIComponent(MODEL) +
+        "&height=" + HEIGHT +
+        "&width=" + WIDTH +
+        "&nologo=true" +
+        "&key=" + encodeURIComponent(getApiKey());
+}
+
+function generarImagen() {
+    var promptEl = document.getElementById("prompt");
+    var prompt = trimText(promptEl.value);
+
+    if (prompt === "") {
+        alert("Escribe un prompt para generar la imagen.");
+        promptEl.focus();
+        return;
+    }
+
+    ultimoPrompt = prompt;
+    guardarEstado(false);
+    setEstado("Generando imagen... No cierres la ventana.", "loading");
+    habilitarBotones(false);
+
+    // Dejamos respirar a la UI para que pinte el mensaje antes de la descarga.
+    setTimeout(function() {
+        generarImagenWinHttpOPowerShell(prompt);
+    }, 100);
+}
+
+function generarImagenWinHttpOPowerShell(prompt) {
+    var url = construirUrl(prompt);
+    var path = getTempImagePath();
+    var ultimoError = "";
+
+    // Metodo 1: WinHTTP. En HTA es mas confiable que MSXML2.XMLHTTP para HTTPS externos.
+    try {
+        var http = new ActiveXObject("WinHttp.WinHttpRequest.5.1");
+        try {
+            // 9 = WinHttpRequestOption_SecureProtocols, 2048 = TLS 1.2.
+            http.Option(9) = 2048;
+        } catch(opErr) {}
+
+        http.Open("GET", url, false);
+        http.SetRequestHeader("User-Agent", "Mozilla/5.0 HTA Pollinations Generator");
+        http.Send();
+
+        if (http.Status === 200) {
+            guardarBytesEnArchivo(http.ResponseBody, path);
+            finalizarPreview(path);
+            return;
+        } else {
+            ultimoError = "HTTP " + http.Status + " " + http.StatusText;
+        }
+    } catch(e1) {
+        ultimoError = e1.message;
+    }
+
+    // Metodo 2: fallback con PowerShell. Sirve cuando HTA/IE bloquea XMLHTTP con "Permiso denegado".
+    try {
+        setEstado("WinHTTP falló (" + ultimoError + "). Reintentando con PowerShell...", "loading");
+        descargarConPowerShell(url, path);
+        finalizarPreview(path);
+        return;
+    } catch(e2) {
+        setEstado("Error al conectar con el endpoint. WinHTTP: " + ultimoError + " | PowerShell: " + e2.message, "error");
+        habilitarBotones(true);
+    }
+}
+
+function guardarBytesEnArchivo(bytes, path) {
+    var stream = new ActiveXObject("ADODB.Stream");
+    stream.Type = 1; // binario
+    stream.Open();
+    stream.Write(bytes);
+    stream.SaveToFile(path, 2); // sobrescribir si existe
+    stream.Close();
+}
+
+function psQuote(txt) {
+    return "'" + String(txt).replace(/'/g, "''") + "'";
+}
+
+function descargarConPowerShell(url, path) {
+    var shell = new ActiveXObject("WScript.Shell");
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+
+    var ps = "$ProgressPreference='SilentlyContinue'; " +
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; " +
+        "Invoke-WebRequest -Uri " + psQuote(url) + " -OutFile " + psQuote(path) + " -UseBasicParsing";
+
+    var cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " + chr34(ps);
+    var exitCode = shell.Run(cmd, 0, true);
+
+    if (exitCode !== 0) {
+        throw new Error("PowerShell terminó con código " + exitCode + ".");
+    }
+
+    if (!fso.FileExists(path)) {
+        throw new Error("PowerShell terminó, pero no creó el archivo.");
+    }
+
+    var file = fso.GetFile(path);
+    if (file.Size < 1000) {
+        throw new Error("El archivo descargado parece inválido o vacío.");
+    }
+}
+
+function chr34(txt) {
+    return '"' + String(txt).replace(/"/g, '\\"') + '"';
+}
+
+function finalizarPreview(path) {
+    ultimoArchivoImagen = path;
+    mostrarPreview(path);
+    guardarEstado(false);
+    setEstado("Imagen generada correctamente.", "ok");
+    habilitarBotones(true);
+}
+
+function guardarImagenDesdeRespuesta(xhr) {
+    try {
+        var path = getTempImagePath();
+        guardarBytesEnArchivo(xhr.responseBody, path);
+        finalizarPreview(path);
+    } catch (e) {
+        setEstado("La imagen se generó, pero no se pudo guardar/previsualizar: " + e.message, "error");
+        habilitarBotones(true);
+    }
+}
+
+function mostrarPreview(path) {
+    var img = document.getElementById("preview-img");
+    var empty = document.getElementById("preview-empty");
+    var info = document.getElementById("archivo-info");
+
+    img.src = "file:///" + path.replace(/\\/g, "/") + "?t=" + new Date().getTime();
+    img.style.display = "block";
+    empty.style.display = "none";
+    info.value = path;
+
+    document.getElementById("btn-abrir").disabled = false;
+    document.getElementById("btn-carpeta").disabled = false;
+}
+
+function abrirImagen() {
+    if (ultimoArchivoImagen === "") return;
+    try {
+        var shell = new ActiveXObject("WScript.Shell");
+        shell.Run('cmd /c start "" "' + ultimoArchivoImagen + '"', 0, false);
+    } catch(e) {
+        alert("No se pudo abrir la imagen: " + e.message);
+    }
+}
+
+function abrirCarpeta() {
+    if (ultimoArchivoImagen === "") return;
+    try {
+        var shell = new ActiveXObject("WScript.Shell");
+        shell.Run('explorer.exe /select,"' + ultimoArchivoImagen + '"', 1, false);
+    } catch(e) {
+        alert("No se pudo abrir la carpeta: " + e.message);
+    }
+}
+
+function copiarRuta() {
+    var box = document.getElementById("archivo-info");
+    if (!box || box.value === "") return;
+    box.select();
+    try {
+        document.execCommand("copy");
+        setEstado("Ruta copiada al portapapeles.", "ok");
+    } catch(e) {
+        setEstado("No se pudo copiar la ruta.", "error");
+    }
+}
+
+function limpiarTodo() {
+    document.getElementById("prompt").value = "";
+    document.getElementById("api-key").value = DEFAULT_API_KEY;
+    document.getElementById("archivo-info").value = "";
+    document.getElementById("preview-img").style.display = "none";
+    document.getElementById("preview-img").src = "";
+    document.getElementById("preview-empty").style.display = "block";
+    ultimoArchivoImagen = "";
+    ultimoPrompt = "";
+    setEstado("Listo.", "info");
+    habilitarBotones(true);
+    borrarEstadoGuardado();
+}
+
+function guardarEstado(mostrarMensaje) {
+    try {
+        var estado = {
+            prompt: document.getElementById("prompt").value,
+            apiKey: getApiKey(),
+            ultimoArchivoImagen: ultimoArchivoImagen
+        };
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var file = fso.CreateTextFile(getEstadoPath(), true, true);
+        file.Write(JSON.stringify(estado));
+        file.Close();
+        if (mostrarMensaje) setEstado("Estado guardado.", "ok");
+    } catch(e) {
+        if (mostrarMensaje) setEstado("No se pudo guardar el estado: " + e.message, "error");
+    }
+}
+
+function cargarEstado() {
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var path = getEstadoPath();
+        if (!fso.FileExists(path)) return;
+
+        var file = fso.OpenTextFile(path, 1, false, -1);
+        var txt = file.ReadAll();
+        file.Close();
+
+        if (txt) {
+            var estado = JSON.parse(txt);
+            if (estado.prompt) document.getElementById("prompt").value = estado.prompt;
+            if (estado.apiKey) document.getElementById("api-key").value = estado.apiKey;
+            if (estado.ultimoArchivoImagen && fso.FileExists(estado.ultimoArchivoImagen)) {
+                ultimoArchivoImagen = estado.ultimoArchivoImagen;
+                mostrarPreview(ultimoArchivoImagen);
+                setEstado("Última imagen cargada desde el estado guardado.", "ok");
+            }
+        }
+    } catch(e) {
+        setEstado("No se pudo cargar el estado guardado.", "error");
+    }
+}
+
+function borrarEstadoGuardado() {
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var path = getEstadoPath();
+        if (fso.FileExists(path)) fso.DeleteFile(path);
+    } catch(e) {}
+}
+
+function generarInterfaz() {
+    var html = "";
+
+    html += '<div class="command-block header-block">';
+    html += '<div class="app-title">Generador de Imágenes Pollinations</div>';
+    html += '<div class="app-subtitle">GET /image/{prompt encodeURIComponent} · WinHTTP/PowerShell · flux · 1024x576</div>';
+    html += '</div>';
+
+    html += '<div class="command-block">';
+    html += '<div class="description">API Key</div>';
+    html += '<input type="text" id="api-key" class="textarea api-key-box" value="' + DEFAULT_API_KEY + '" autocomplete="off">';
+    html += '</div>';
+
+    html += '<div class="command-block">';
+    html += '<div class="description">Prompt / image_script</div>';
+    html += '<textarea id="prompt" class="prompt-box" placeholder="Ejemplo: cinematic vertical photo of a futuristic city at sunset, ultra detailed"></textarea>';
+    html += '<div class="button-row">';
+    html += '<button id="btn-generar" class="btn-action btn-generate" onclick="generarImagen()">Generar imagen</button>';
+    html += '<button class="btn-action btn-save" onclick="guardarEstado(true)">Guardar</button>';
+    html += '<button class="btn-action btn-clear" onclick="limpiarTodo()">Limpiar</button>';
+    html += '</div>';
+    html += '<div id="estado" class="estado info">Listo.</div>';
+    html += '</div>';
+
+    html += '<div class="command-block">';
+    html += '<div class="description">Previsualización</div>';
+    html += '<div class="preview-wrap">';
+    html += '<div id="preview-empty" class="preview-empty">La imagen aparecerá aquí apenas termine la generación.</div>';
+    html += '<img id="preview-img" class="preview-img" style="display:none;" />';
+    html += '</div>';
+    html += '</div>';
+
+    html += '<div class="command-block">';
+    html += '<div class="description">Archivo generado</div>';
+    html += '<input type="text" id="archivo-info" class="textarea" readonly onclick="copiarRuta()">';
+    html += '<div class="button-row">';
+    html += '<button id="btn-abrir" class="btn-action btn-open" onclick="abrirImagen()" disabled>Abrir imagen</button>';
+    html += '<button id="btn-carpeta" class="btn-action btn-open" onclick="abrirCarpeta()" disabled>Abrir carpeta</button>';
+    html += '<button class="btn-action btn-copy" onclick="copiarRuta()">Copiar ruta</button>';
+    html += '</div>';
+    html += '</div>';
+
+    document.getElementById("contenedor-comandos").innerHTML = html;
+}
+
+window.onload = function() {
+    setTimeout(function() {
+        window.resizeTo(520, 860);
+        window.moveTo(0, 0);
+        generarInterfaz();
+        cargarEstado();
+    }, 100);
+};
+
+function closed() {
+    window.close();
+}
+</script>
+</head>
+
+<body scroll="auto" onbeforeunload="guardarEstado(false)">
+<div id="contenedor-comandos"></div>
+<div class="bottom-space"></div>
+</body>
+
+<style>
+    html {
+        overflow: hidden;
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background-color: #1a1a1a;
+    }
+
+    body {
+        overflow-y: auto;
+        overflow-x: hidden;
+        margin: 0;
+        padding: 6px;
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+        font-family: Arial, sans-serif;
+        font-size: 12px;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+    }
+
+    #contenedor-comandos {
+        height: auto;
+        overflow: visible;
+    }
+
+    .bottom-space {
+        height: 12px;
+        width: 100%;
+    }
+
+    .command-block {
+        margin-bottom: 6px;
+        padding: 7px;
+        border-bottom: 1px solid #333;
+        width: 98%;
+        box-sizing: border-box;
+    }
+
+    .header-block {
+        border-bottom: 1px solid #444;
+        padding-bottom: 10px;
+    }
+
+    .app-title {
+        font-size: 17px;
+        color: #ffffff;
+        font-weight: bold;
+        margin-bottom: 3px;
+    }
+
+    .app-subtitle {
+        font-size: 11px;
+        color: #bdbdbd;
+    }
+
+    .description {
+        font-weight: bold;
+        margin-bottom: 5px;
+        color: #ffffff;
+        font-size: 12px;
+        line-height: 1.2;
+        user-select: none;
+    }
+
+    .prompt-box {
+        border: solid 1px #555;
+        background-color: #2b2b2b;
+        color: #ffffff;
+        box-sizing: border-box;
+        width: 100%;
+        padding: 8px;
+        height: 120px;
+        border-radius: 5px;
+        resize: vertical;
+        overflow: auto;
+        font-family: Consolas, monospace;
+        font-size: 13px;
+        margin-bottom: 7px;
+    }
+
+    .textarea {
+        border: solid 1px #555;
+        background-color: #333;
+        color: #ffffff;
+        box-sizing: border-box;
+        width: 100%;
+        padding: 4px 6px;
+        height: 26px;
+        border-radius: 5px;
+        resize: none;
+        overflow: hidden;
+        font-family: Consolas, monospace;
+        font-size: 12px;
+        margin-bottom: 6px;
+    }
+
+    .api-key-box {
+        font-size: 11px;
+    }
+
+    .prompt-box:hover, .textarea:hover {
+        border-color: #777;
+    }
+
+    .prompt-box:focus, .textarea:focus {
+        outline: none;
+        border-color: #4d90fe;
+        box-shadow: 0 0 2px #4d90fe;
+    }
+
+    .button-row {
+        display: flex;
+        gap: 6px;
+        width: 100%;
+        margin-top: 4px;
+    }
+
+    .btn-action {
+        color: white;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 11px;
+        padding: 7px 10px;
+        font-weight: bold;
+        border: none;
+    }
+
+    .btn-action:disabled {
+        opacity: 0.45;
+        cursor: default;
+    }
+
+    .btn-generate {
+        background-color: #1976D2;
+        flex: 1;
+    }
+    .btn-generate:hover { background-color: #1e88e5; }
+    .btn-generate:active { background-color: #0d47a1; }
+
+    .btn-save {
+        background-color: #2e7d32;
+        border: 1px solid #1b5e20;
+    }
+    .btn-save:hover { background-color: #388e3c; }
+
+    .btn-clear {
+        background-color: #c62828;
+        border: 1px solid #b71c1c;
+    }
+    .btn-clear:hover { background-color: #d32f2f; }
+
+    .btn-open {
+        background-color: #6a1b9a;
+        border: 1px solid #4a148c;
+        flex: 1;
+    }
+    .btn-open:hover { background-color: #7b1fa2; }
+
+    .btn-copy {
+        background-color: #455a64;
+        border: 1px solid #263238;
+    }
+    .btn-copy:hover { background-color: #546e7a; }
+
+    .estado {
+        margin-top: 7px;
+        padding: 6px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: bold;
+    }
+
+    .estado.info { background-color: #263238; color: #e0e0e0; }
+    .estado.loading { background-color: #5d4037; color: #ffe0b2; }
+    .estado.ok { background-color: #1b5e20; color: #c8e6c9; }
+    .estado.error { background-color: #b71c1c; color: #ffcdd2; }
+
+    .preview-wrap {
+        width: 100%;
+        min-height: 360px;
+        border: 1px solid #444;
+        background-color: #111;
+        border-radius: 6px;
+        text-align: center;
+        overflow: hidden;
+        box-sizing: border-box;
+        padding: 5px;
+    }
+
+    .preview-empty {
+        color: #888;
+        font-size: 12px;
+        padding-top: 160px;
+    }
+
+    .preview-img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 4px;
+        display: block;
+        margin: 0 auto;
+    }
+
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: #2a2a2a; }
+    ::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #777; }
+
+    @media (max-width: 300px) {
+        body { padding: 3px; font-size: 11px; }
+        .command-block { margin-bottom: 3px; padding: 4px; }
+        .prompt-box { height: 100px; font-size: 12px; }
+        .description { font-size: 10px; }
+        .btn-action { font-size: 9px; padding: 5px 6px; }
+    }
+</style>
+</html>
