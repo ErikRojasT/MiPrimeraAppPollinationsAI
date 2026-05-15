@@ -10,11 +10,6 @@ La app permite escribir un prompt, generar una imagen vertical, previsualizarla 
 
 ![Vista previa de la app HTA](https://raw.githubusercontent.com/ErikRojasT/MiPrimeraAppPollinationsAI/d04c39c1d10d94ce20bd01d315a15c2731b7a73d/hta_imagen.png)
 
-También puedes usar esta versión más corta para la imagen si prefieres ruta relativa dentro del repo:
-
-```markdown
-![Vista previa de la app HTA](./hta_imagen.png)
-```
 
 ---
 
